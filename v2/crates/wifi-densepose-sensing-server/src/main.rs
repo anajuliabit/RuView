@@ -4498,12 +4498,20 @@ async fn calibration_start(State(state): State<SharedState>) -> Json<serde_json:
             _ => {} // Stale/Expired/Uncalibrated — ok to recalibrate
         }
     }
-    match FieldModel::new(field_bridge::single_link_config()) {
+    // Size the field model to the actual CSI frame width so feed_calibration
+    // doesn't reject every frame on a width mismatch (see field_bridge docs).
+    let n_sub = s
+        .node_states
+        .values()
+        .filter_map(|ns| ns.frame_history.back().map(Vec::len))
+        .find(|&n| n > 0)
+        .unwrap_or(56);
+    match FieldModel::new(field_bridge::single_link_config(n_sub)) {
         Ok(fm) => {
             s.field_model = Some(fm);
             Json(serde_json::json!({
                 "success": true,
-                "message": "Calibration started — keep room empty while frames accumulate.",
+                "message": format!("Calibration started ({n_sub} subcarriers) — keep room empty while frames accumulate."),
             }))
         }
         Err(e) => Json(serde_json::json!({
@@ -6892,7 +6900,9 @@ async fn main() {
         ),
         field_model: if args.calibrate {
             info!("Field model calibration enabled — room should be empty during startup");
-            FieldModel::new(field_bridge::single_link_config()).ok()
+            // No live frame yet at startup; default to 56. The /calibration/start
+            // endpoint re-sizes to the real frame width once frames are flowing.
+            FieldModel::new(field_bridge::single_link_config(56)).ok()
         } else {
             None
         },

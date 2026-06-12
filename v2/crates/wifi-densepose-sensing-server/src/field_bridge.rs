@@ -32,9 +32,20 @@ const MAX_SINGLE_LINK_OCCUPANCY: usize = 3;
 
 /// Create a FieldModelConfig for single-link mode (one ESP32 node = one link).
 /// This avoids the DimensionMismatch error when feeding single-frame observations.
-pub fn single_link_config() -> FieldModelConfig {
+pub fn single_link_config(n_subcarriers: usize) -> FieldModelConfig {
     FieldModelConfig {
         n_links: 1,
+        // Match the model width to the actual incoming CSI frame. Hardcoding 56
+        // (the default) silently breaks calibration on boards that report a
+        // different subcarrier count (e.g. HT20 ESP32 frames carry 64 raw bins):
+        // `LinkStats::update` returns DimensionMismatch, which `maybe_feed_calibration`
+        // swallows at debug level, pinning calibration_frame_count at 0.
+        n_subcarriers: if n_subcarriers > 0 { n_subcarriers } else { 56 },
+        // A single ESP32 link streams ~20 Hz. The 12 000-frame default (~10 min)
+        // is impractical for interactive empty-room calibration; 1 200 frames
+        // (~60 s) mirrors the firmware's own 60 s ambient-calibration window and
+        // is enough to seed the single-link covariance baseline.
+        min_calibration_frames: 1_200,
         ..FieldModelConfig::default()
     }
 }
@@ -102,7 +113,15 @@ pub fn occupancy_or_fallback(
 /// Only acts when the model status is `Collecting`. Wraps the latest frame
 /// as a single-link observation (n_links=1) and feeds it.
 pub fn maybe_feed_calibration(field: &mut FieldModel, frame_history: &VecDeque<Vec<f64>>) {
-    if field.status() != CalibrationStatus::Collecting {
+    // Feed while Uncalibrated (the first `feed_calibration` call transitions the
+    // model Uncalibrated -> Collecting) and while Collecting. Without accepting
+    // the Uncalibrated state here, the model could never leave it: the feed that
+    // performs the transition would itself be skipped — a deadlock that pins
+    // calibration_frame_count at 0 (observed via /api/v1/calibration/status).
+    if !matches!(
+        field.status(),
+        CalibrationStatus::Uncalibrated | CalibrationStatus::Collecting
+    ) {
         return;
     }
     if let Some(latest) = frame_history.back() {
